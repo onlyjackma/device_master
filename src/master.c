@@ -102,6 +102,7 @@ static void keep_alive_check(struct uloop_timeout *timeout)
 			p->id,p->obj_id,p->key,p->name,p->path,p->method);
 		
 		if (ubus_lookup_id(ctx, p->path, &retid)) {
+			printf("Failed to look up %s object\n",p->name);
 			p->id = 0;
 			p->obj_id = 0;
 			free(p->key);
@@ -109,7 +110,6 @@ static void keep_alive_check(struct uloop_timeout *timeout)
 			free(p->path);
 			free(p->method);
 			list_del(&p->list);
-			printf("Failed to look up %s object\n",p->name);
 		}
 
 		if(p->obj_id != retid){
