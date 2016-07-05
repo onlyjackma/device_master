@@ -5,23 +5,9 @@
 #include <unistd.h>
 #include <libubox/ustream.h>
 #include <libubus.h>
-
-struct worker{
-	int id;
-	uint32_t obj_id;
-	char *key;
-	char *name;
-	char *path;
-	char *method;
-	struct list_head list;
-};
-
-struct mqtt_msg{
-	char *key;
-	char *msg;
-	int msg_len;
-	struct list_head list;
-};
+#include "mqtt_msg.h"
+#include "mqtt_worker.h"
+#include "worker.h"
 
 static struct ubus_context *ctx;
 static struct blob_buf b;
@@ -29,15 +15,6 @@ static struct blob_buf b;
 LIST_HEAD(workers);
 LIST_HEAD(mqtt_msgs);
 
-int check_worker(char *key ,char *path, char *method){
-	struct worker *p,*n;
-	list_for_each_entry_safe(p,n,&workers,list){
-		if(strcmp(key,p->key)==0 && strcmp(path,p->path)==0 && strcmp(method,p->method)==0){
-			return 1;
-		}
-	}
-	return 0;
-}
 enum {
 	MAC,
 	INTERFACES,
@@ -66,31 +43,9 @@ static void sys_api_data_cb(struct ubus_request *req,
 	printf("mac:%s \n interfaces %s",mac,inters);
 }
 
-struct worker *init_worker(int id,char *key ,char *name ,char *path, char *method){
-	struct worker *_wk = calloc(1,sizeof(struct worker));
-	if(!_wk){
-		printf("calloc faild %s",strerror(errno));
-	}
-	if(check_worker(key,path,method)){
-			free(_wk);
-			_wk = NULL;
-			goto out;
-	}
-	_wk->id = id;
-	_wk->obj_id = 0;
-	_wk->key = strdup(key);
-	_wk->name = strdup(name);
-	_wk->path = strdup(path);
-	_wk->method = strdup(method);
-out:		
-	return _wk;
-}
-
-
 static void keep_alive_check(struct uloop_timeout *timeout)
 {
-	uint32_t id;
-	int retid;
+	uint32_t retid;
 	struct worker *p,*n;
 	if(list_empty(&workers)){
 		printf("Worker list is empty \n");
@@ -103,13 +58,8 @@ static void keep_alive_check(struct uloop_timeout *timeout)
 		
 		if (ubus_lookup_id(ctx, p->path, &retid)) {
 			printf("Failed to look up %s object\n",p->name);
-			p->id = 0;
-			p->obj_id = 0;
-			free(p->key);
-			free(p->name);
-			free(p->path);
-			free(p->method);
 			list_del(&p->list);
+			free_worker(p);
 		}
 
 		if(p->obj_id != retid){
@@ -132,16 +82,18 @@ static int send_msg_to_worker(struct worker *wk ,struct mqtt_msg *msg){
 	ubus_invoke(ctx, wk->obj_id, wk->method, b.head, sys_api_data_cb, 0, 2000);
 	return 0;
 }
+#if 0
 static void build_test(){
 	struct mqtt_msg *mq=calloc(1,sizeof(struct mqtt_msg));
 	char *s = "sys,{\"aa\":\"bb\"}";
 	mq->msg = strdup(s);
 	mq->key = strdup("sys");
 	mq->msg_len = strlen(s);
-	list_add(&mq->list,&mqtt_msgs);
+	list_add_tail(&mq->list,&mqtt_msgs);
 }
+#endif
+
 static void mqtt_msg_dispather(struct uloop_timeout *timeout){
-	uint32_t id;
 	struct worker *p,*n;
 	struct mqtt_msg *mp,*mn;
 
@@ -157,21 +109,18 @@ static void mqtt_msg_dispather(struct uloop_timeout *timeout){
 			}
 		}
 
-		free(mp->msg);
-		free(mp->key);
 		list_del(&mp->list);
+		free_mqtt_msg(mp);
 	}
-	build_test();
+	//build_test();
 	
 out:	
-	uloop_timeout_set(timeout, 3000);
+	uloop_timeout_set(timeout, 1000);
 }
 
 static struct uloop_timeout mqtt_msg_dispatcher_timer = {
 	.cb = mqtt_msg_dispather,
 };
-
-
 
 enum{
 	REG_ID,
@@ -195,7 +144,7 @@ static int reg_handler(struct ubus_context *ctx, struct ubus_object *obj,
 		      struct blob_attr *msg)
 {
 	struct blob_attr *tb[__REG_MAX];
-	int id,obj_id;
+	int id;
 	char *key , *name ,*path , *_method;
 	struct worker *wk = NULL;
 	
@@ -218,6 +167,7 @@ static int reg_handler(struct ubus_context *ctx, struct ubus_object *obj,
 		ubus_send_reply(ctx,req,b.head);
 		goto out;
 	}
+
 	list_add_tail(&wk->list,&workers);
 
 	blob_buf_init(&b,0);
@@ -229,25 +179,179 @@ static int reg_handler(struct ubus_context *ctx, struct ubus_object *obj,
 	printf("path is :%s id is :%d  name %s method %s\n",obj->path,obj->id,obj->name,method);
 
 	ubus_send_reply(ctx,req,b.head);
-	/*
-	if (ubus_lookup_id(ctx, "sys_api", &obj_id)) {
-		fprintf(stderr, "Failed to look up test object\n");
-		return;
-	}
-
-	
-	blob_buf_init(&b, 0);
-	blobmsg_add_u32(&b, "id", obj->id);
-	blobmsg_add_string(&b, "msg", "getsysinfo");
-	ubus_invoke(ctx, obj_id, "sys_status", b.head, sys_api_data_cb, 0, 3000);
-	printf("-------id is %d\n",id);
-	*/
 out:
 	return 0;
 }
 
+enum{
+	PUB_MSG,
+	__PUB_MAX,
+};
+
+static const struct blobmsg_policy pub_policy[__PUB_MAX] = {
+	[PUB_MSG] = {.name = "msg", .type = BLOBMSG_TYPE_STRING },
+};
+
+static int pub_handler(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
+{
+	struct blob_attr *tb[__PUB_MAX];
+	char *_msg;
+	int msg_len;
+	int ret;
+	blobmsg_parse(pub_policy,__PUB_MAX,tb,blob_data(msg),blob_len(msg));
+	if(!tb[PUB_MSG]){
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+	_msg = blobmsg_get_string(tb[PUB_MSG]);
+
+	msg_len = strlen(_msg);
+	printf("msg is %s len is %d\n",_msg,msg_len);
+
+	if(mqtt_pub_msg(_msg,msg_len) == 0){
+		ret = 1;
+	}
+
+	blob_buf_init(&b,0);
+	blobmsg_add_u8(&b,"result",ret);
+	ubus_send_reply(ctx,req,b.head);
+	
+	return 0;
+}
+
+enum{
+	TPUB_TOPIC,
+	TPUB_MSG,
+	__TPUB_MAX,
+};
+
+static const struct blobmsg_policy tpub_policy[__TPUB_MAX] = {
+	[TPUB_TOPIC] = {.name = "topic", .type = BLOBMSG_TYPE_STRING },
+	[TPUB_MSG] = {.name = "msg", .type = BLOBMSG_TYPE_STRING },
+};
+
+static int tpub_handler(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
+{
+	struct blob_attr *tb[__TPUB_MAX];
+	char *_msg,*topic;
+	int msg_len,topic_len;
+	int ret;
+	blobmsg_parse(tpub_policy,__TPUB_MAX,tb,blob_data(msg),blob_len(msg));
+	if(!tb[TPUB_TOPIC] || !tb[TPUB_MSG]){
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+	
+	topic = blobmsg_get_string(tb[TPUB_TOPIC]);
+	_msg = blobmsg_get_string(tb[TPUB_MSG]);
+
+	msg_len = strlen(_msg);
+	topic_len = strlen(_msg);
+
+	printf("topic is %s ,topic len is %d ,msg is %s len is %d\n",topic,topic_len,_msg,msg_len);
+
+	if(mqtt_tpub_msg(topic,_msg,msg_len) == 0){
+		ret = 1;
+	}
+
+	blob_buf_init(&b,0);
+	blobmsg_add_u8(&b,"result",ret);
+	ubus_send_reply(ctx,req,b.head);
+	
+	return 0;
+
+}
+
+enum{
+	PUBF_PATH,
+	__PUBF_MAX,
+};
+
+static const struct blobmsg_policy pubf_policy[__PUBF_MAX] = {
+	[PUBF_PATH] = {.name = "filepath", .type = BLOBMSG_TYPE_STRING },
+};
+
+static int pubf_handler(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
+{
+	struct blob_attr *tb[__PUBF_MAX];
+	char *path;
+	int path_len;
+	int ret;
+	blobmsg_parse(pubf_policy,__PUBF_MAX,tb,blob_data(msg),blob_len(msg));
+	if(!tb[PUBF_PATH]){
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+	path = blobmsg_get_string(tb[PUBF_PATH]);
+
+	path_len = strlen(path);
+	printf("msg is %s len is %d\n",path,path_len);
+
+	if(mqtt_pub_file(path) == 0){
+		ret = 1;
+	}
+
+	blob_buf_init(&b,0);
+	blobmsg_add_u8(&b,"result",ret);
+	ubus_send_reply(ctx,req,b.head);
+	
+	return 0;
+
+}
+
+enum{
+	TPUBF_TOPIC,
+	TPUBF_PATH,
+	__TPUBF_MAX,
+};
+
+static const struct blobmsg_policy tpubf_policy[__TPUBF_MAX] = {
+	[TPUBF_TOPIC] = {.name = "topic", .type = BLOBMSG_TYPE_STRING },
+	[TPUBF_PATH] = {.name = "filepath", .type = BLOBMSG_TYPE_STRING },
+};
+
+static int tpubf_handler(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
+{
+	struct blob_attr *tb[__TPUBF_MAX];
+	char *path,*topic;
+	int path_len,topic_len;
+	int ret;
+
+	blobmsg_parse(tpubf_policy,__TPUBF_MAX,tb,blob_data(msg),blob_len(msg));
+	if(!tb[TPUBF_TOPIC] || !tb[TPUBF_PATH]){
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+
+	topic = blobmsg_get_string(tb[TPUBF_TOPIC]);
+	path = blobmsg_get_string(tb[TPUBF_PATH]);
+
+	topic_len = strlen(topic);
+	path_len = strlen(path);
+	printf("topic is %s , topic len is %d ,msg is %s len is %d\n",topic,topic_len,path,path_len);
+
+	if(mqtt_tpub_file(topic,path) == 0){
+		ret = 1;
+	}
+
+	blob_buf_init(&b,0);
+	blobmsg_add_u8(&b,"result",ret);
+	ubus_send_reply(ctx,req,b.head);
+	
+	return 0;
+
+}
+
 static const struct ubus_method master_methods[] = {
 	UBUS_METHOD("register",reg_handler,reg_policy),
+	UBUS_METHOD("pub",pub_handler,pub_policy),
+	UBUS_METHOD("tpub",tpub_handler,tpub_policy),
+	UBUS_METHOD("pubf",pubf_handler,pubf_policy),
+	UBUS_METHOD("tpubf",tpubf_handler,tpubf_policy),
 };
 
 static struct ubus_object_type master_object_type = 
@@ -262,8 +366,6 @@ static struct ubus_object master_object = {
 
 static void client_main(void)
 {
-	static struct ubus_request req;
-	uint32_t id;
 	int ret;
 	ret = ubus_add_object(ctx, &master_object);
 	if (ret) {
@@ -273,7 +375,6 @@ static void client_main(void)
 
 	uloop_timeout_set(&keep_alive_timer, 2000);
 	uloop_timeout_set(&mqtt_msg_dispatcher_timer, 2000);
-	uloop_run();
 }
 
 
@@ -306,6 +407,11 @@ int main(int argc, char **argv)
 	ubus_add_uloop(ctx);
 
 	client_main();
+
+	start_mqtt_worker();
+
+	uloop_run();
+
 
 	ubus_free(ctx);
 	uloop_done();

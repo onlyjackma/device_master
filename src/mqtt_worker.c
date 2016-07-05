@@ -2,24 +2,29 @@
 #include <mosquitto.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <libubox/ustream.h>
 
 #include "mqtt_worker.h"
+#include "mqtt_msg.h"
 
 struct config {
 	char *pub_topic;
 	char *sub_topic;
 };
 
-
 struct mosquitto *mosq = NULL;
 extern struct list_head mqtt_msgs;
 struct config conf;
+static bool mqtt_connected;
+
 static bool is_mqtt_alive(){
 	return mqtt_connected;
 }
@@ -40,9 +45,8 @@ static int _mqtt_pub_msg(const char *topic ,const char *msg, int  msg_len)
 		printf("Please check your parameters\n");
 		return -1;
 	}
-	
-	return  mosquitto_publish(mosq, NULL, topic, msg_len, msg,MQTT_QOS_1,false);
 
+	return  mosquitto_publish(mosq, NULL, topic, msg_len, msg,MQTT_QOS_1,false);
 }
 
 int mqtt_pub_msg(const char *msg, int  msg_len)
@@ -51,6 +55,14 @@ int mqtt_pub_msg(const char *msg, int  msg_len)
 		msg_len = strlen(msg);
 	}
 	return _mqtt_pub_msg(conf.pub_topic,msg,msg_len);
+}
+
+int mqtt_tpub_msg(const char *topic, const char *msg, int  msg_len)
+{
+	if(!msg&&msg_len == 0){
+		msg_len = strlen(msg);
+	}
+	return _mqtt_pub_msg(topic,msg,msg_len);
 }
 
 static int _mqtt_pub_file(const char *topic ,const char *file)
@@ -82,11 +94,11 @@ static int _mqtt_pub_file(const char *topic ,const char *file)
 		
 	msg=mmap(NULL,flen,PROT_READ,MAP_PRIVATE,fd,0);
 	if(msg == MAP_FAILED){
-		printf("mmap file %s faild, error:%s ",file,strerror(errno));
+		printf("mmap file %s faild, error:%s \n",file,strerror(errno));
 		goto out;
 	}
 
-	ret = mqtt_pub_msg(msg,flen);
+	ret = _mqtt_pub_msg(topic,msg,flen);
 	munmap(msg,flen);
 	
 out:
@@ -101,10 +113,24 @@ int mqtt_pub_file(const char *file)
 	return	_mqtt_pub_file(conf.pub_topic,file);
 }
 
+int mqtt_tpub_file(const char *topic, const char *file)
+{
+	return	_mqtt_pub_file(topic,file);
+}
+
 void my_message_callback(struct mosquitto *mosq, void *userdata, const struct mosquitto_message *message)
 {
+	struct mqtt_msg *mqmsg;
+	
 	if(message->payloadlen){
-		printf("%s === %s\n", message->topic, message->payload);
+		printf("%s === %s\n", message->topic, (char *)message->payload);
+		mqmsg = init_mqtt_msg(message->payload,message->payloadlen);
+		if(mqmsg){
+			list_add_tail(&mqmsg->list,&mqtt_msgs);
+		}else{
+			printf("init mqtt msg faild!\n");
+		}
+		
 	}else{
 		printf("%s (null)\n", message->topic);
 	}
@@ -113,7 +139,6 @@ void my_message_callback(struct mosquitto *mosq, void *userdata, const struct mo
 
 void my_connect_callback(struct mosquitto *mosq, void *userdata, int result)
 {
-	int i;
 	if(!result){
 		/* Subscribe to broker information topics on successful connect. */
 		mqtt_connected = true;
@@ -123,10 +148,12 @@ void my_connect_callback(struct mosquitto *mosq, void *userdata, int result)
 		fprintf(stderr, "Connect failed\n");
 	}
 }
+
 void my_disconnect_callback(struct mosquitto *mosq, void *userdata, int result)
 {
 	if(!result){
 		mqtt_connected = false;
+		printf("mqtt disconnet from the server!");
 	}
 }
 
@@ -144,12 +171,11 @@ void my_subscribe_callback(struct mosquitto *mosq, void *userdata, int mid, int 
 void my_log_callback(struct mosquitto *mosq, void *userdata, int level, const char *str)
 {
 	/* Pring all log messages regardless of level. */
-	//printf("%s\n", str);
+	//printf("level %d %s\n", level,str);
 }
 
 int start_mqtt_worker(){
 
-	int i;
 	char *host = "macauth.16wifi.com";
 	int port = 1883;
 	int keepalive = 60;
@@ -174,6 +200,7 @@ int start_mqtt_worker(){
 		return 1;
 	}
 
+	init_conf();
 	return mosquitto_loop_start(mosq);
 
 }
@@ -187,7 +214,8 @@ void stop_mqtt_worker(){
 	mosquitto_lib_cleanup();
 
 }
-#if 1
+
+#if 0
 int main(int argc, char *argv[])
 {
 	init_conf();
@@ -195,9 +223,8 @@ int main(int argc, char *argv[])
 	while(true){
 		sleep(1);
 		mqtt_pub_msg("hello super man !",16);
+		mqtt_pub_file("test.txt");
 	}
-
-		
 
 }
 #endif
