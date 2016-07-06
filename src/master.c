@@ -8,11 +8,12 @@
 #include "mqtt_msg.h"
 #include "mqtt_worker.h"
 #include "worker.h"
+#include "config.h"
 
 static struct ubus_context *ctx;
 static struct blob_buf b;
 static int worker_count = 0;
-
+extern struct config *conf;
 LIST_HEAD(workers);
 LIST_HEAD(mqtt_msgs);
 
@@ -419,16 +420,53 @@ static void client_main(void)
 	uloop_timeout_set(&mqtt_msg_dispatcher_timer, 2000);
 }
 
+int ubus_start()
+{
+	const char *ubus_socket = conf->ubus_sock_path;
+
+	uloop_init();
+	ctx = ubus_connect(ubus_socket);
+	if (!ctx) {
+		fprintf(stderr, "Failed to connect to ubus\n");
+		return -1;
+	}
+
+	ubus_add_uloop(ctx);
+	client_main();
+	uloop_run();
+	return 0;
+
+}
+
+int ubus_stop()
+{
+	ubus_free(ctx);
+	uloop_done();
+	return 0;
+
+}
+static void usage(){
+	printf("usage:device_manager -c /pathto/config.conf -d 0/1\n");
+	exit(0);
+}
 
 int main(int argc, char **argv)
 {
-	const char *ubus_socket = NULL;
+	const char *file = NULL;
 	int ch;
+	int daemon;
 
-	while ((ch = getopt(argc, argv, "cs:")) != -1) {
+	if(argc < 3){
+		usage();
+	}
+
+	while ((ch = getopt(argc, argv, "dc:")) != -1) {
 		switch (ch) {
-		case 's':
-			ubus_socket = optarg;
+		case 'c':
+			file = optarg;
+			break;
+		case 'd':
+			daemon = 1;
 			break;
 		default:
 			break;
@@ -437,26 +475,10 @@ int main(int argc, char **argv)
 
 	argc -= optind;
 	argv += optind;
+	printf("%s %d\n",file,daemon);
 
-	uloop_init();
-
-	ctx = ubus_connect(ubus_socket);
-	if (!ctx) {
-		fprintf(stderr, "Failed to connect to ubus\n");
-		return -1;
-	}
-
-	ubus_add_uloop(ctx);
-
-	client_main();
-
+	parse_config_file(file);
 	start_mqtt_worker();
-
-	uloop_run();
-
-
-	ubus_free(ctx);
-	uloop_done();
-
+	ubus_start();
 	return 0;
 }

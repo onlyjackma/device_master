@@ -14,25 +14,17 @@
 
 #include "mqtt_worker.h"
 #include "mqtt_msg.h"
-
-struct config {
-	char *pub_topic;
-	char *sub_topic;
-};
+#include "config.h"
 
 struct mosquitto *mosq = NULL;
 extern struct list_head mqtt_msgs;
-struct config conf;
+extern struct config *conf;
 static bool mqtt_connected;
 
 static bool is_mqtt_alive(){
 	return mqtt_connected;
 }
 
-void init_conf(){
-	conf.sub_topic = strdup("/hello/res");
-	conf.pub_topic = strdup("/hello/req");
-}
 
 static int _mqtt_pub_msg(const char *topic ,const char *msg, int  msg_len)
 {
@@ -54,7 +46,7 @@ int mqtt_pub_msg(const char *msg, int  msg_len)
 	if(!msg&&msg_len == 0){
 		msg_len = strlen(msg);
 	}
-	return _mqtt_pub_msg(conf.pub_topic,msg,msg_len);
+	return _mqtt_pub_msg(conf->mqtt_pub_topic,msg,msg_len);
 }
 
 int mqtt_tpub_msg(const char *topic, const char *msg, int  msg_len)
@@ -110,7 +102,7 @@ out:
 
 int mqtt_pub_file(const char *file)
 {
-	return	_mqtt_pub_file(conf.pub_topic,file);
+	return	_mqtt_pub_file(conf->mqtt_pub_topic,file);
 }
 
 int mqtt_tpub_file(const char *topic, const char *file)
@@ -143,7 +135,7 @@ void my_connect_callback(struct mosquitto *mosq, void *userdata, int result)
 		/* Subscribe to broker information topics on successful connect. */
 		mqtt_connected = true;
 		//mosquitto_subscribe(mosq, NULL, "/device/+/ruijie/#", 1);
-		mosquitto_subscribe(mosq, NULL, conf.sub_topic, 1);
+		mosquitto_subscribe(mosq, NULL, conf->mqtt_sub_topic, 1);
 	}else{
 		fprintf(stderr, "Connect failed\n");
 	}
@@ -176,9 +168,9 @@ void my_log_callback(struct mosquitto *mosq, void *userdata, int level, const ch
 
 int start_mqtt_worker(){
 
-	char *host = "macauth.16wifi.com";
-	int port = 1883;
-	int keepalive = 60;
+	char *host = conf->mqtt_server;
+	int port = conf->mqtt_port;
+	int keepalive = conf->mqtt_keepalive;
 	bool clean_session = true;
 
 	mosquitto_lib_init();
@@ -199,8 +191,10 @@ int start_mqtt_worker(){
 		fprintf(stderr, "Unable to connect.\n");
 		return 1;
 	}
+	if(!conf->mqtt_name && conf->mqtt_password){
+		mosquitto_username_pw_set(mosq,conf->mqtt_name,conf->mqtt_password);
+	}
 
-	init_conf();
 	return mosquitto_loop_start(mosq);
 
 }
