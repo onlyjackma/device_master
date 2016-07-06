@@ -1,8 +1,8 @@
 #include <libubus.h>
-#include "worker.h"
 #include <libubox/ustream.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "worker.h"
 
 extern struct list_head workers;
 

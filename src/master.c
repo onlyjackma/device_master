@@ -11,6 +11,7 @@
 
 static struct ubus_context *ctx;
 static struct blob_buf b;
+static int worker_count = 0;
 
 LIST_HEAD(workers);
 LIST_HEAD(mqtt_msgs);
@@ -60,6 +61,7 @@ static void keep_alive_check(struct uloop_timeout *timeout)
 			printf("Failed to look up %s object\n",p->name);
 			list_del(&p->list);
 			free_worker(p);
+			worker_count--;
 		}
 
 		if(p->obj_id != retid){
@@ -100,6 +102,8 @@ static void mqtt_msg_dispather(struct uloop_timeout *timeout){
 	if(list_empty(&workers)){
 		printf("Worker list is empty \n");
 		goto out;
+	}else{
+		printf("There are %d workers\n",worker_count);
 	}
 
 	list_for_each_entry_safe(mp,mn,&mqtt_msgs,list){
@@ -169,7 +173,8 @@ static int reg_handler(struct ubus_context *ctx, struct ubus_object *obj,
 	}
 
 	list_add_tail(&wk->list,&workers);
-
+	worker_count++;
+	
 	blob_buf_init(&b,0);
 	blobmsg_add_u32(&b,"retid",id);
 	blobmsg_add_string(&b,"retkey",key);
@@ -261,7 +266,6 @@ static int tpub_handler(struct ubus_context *ctx, struct ubus_object *obj,
 	ubus_send_reply(ctx,req,b.head);
 	
 	return 0;
-
 }
 
 enum{
@@ -299,7 +303,6 @@ static int pubf_handler(struct ubus_context *ctx, struct ubus_object *obj,
 	ubus_send_reply(ctx,req,b.head);
 	
 	return 0;
-
 }
 
 enum{
@@ -343,7 +346,45 @@ static int tpubf_handler(struct ubus_context *ctx, struct ubus_object *obj,
 	ubus_send_reply(ctx,req,b.head);
 	
 	return 0;
+}
+enum{
+	CKEY,
+	CPATH,
+	CMETHOD,
+	__CMAX,
+};
 
+static const struct blobmsg_policy check_policy[__CMAX] = {
+	[CKEY] = {.name = "key" ,.type = BLOBMSG_TYPE_STRING },
+	[CPATH] = {.name = "path" ,.type = BLOBMSG_TYPE_STRING},
+	[CMETHOD] = {.name = "method" ,.type = BLOBMSG_TYPE_STRING},
+};
+
+static int check_handler(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
+{
+	char *key ,*path,*_method;
+	struct blob_attr *tb[__CMAX];
+	int  ret = 0;
+	blobmsg_parse(check_policy,__CMAX,tb,blob_data(msg),blob_len(msg));
+	if(!tb[CKEY] || !tb[CPATH] || !tb[CMETHOD]){
+		ret = 0;
+		goto out;
+	}
+
+	key = blobmsg_get_string(tb[CKEY]);
+	path = blobmsg_get_string(tb[CPATH]);
+	_method  = blobmsg_get_string(tb[CMETHOD]);
+	if(check_worker(key,path,_method)){
+		ret = 1;
+	}
+
+out:
+	blob_buf_init(&b,0);
+	blobmsg_add_u8(&b,"result",ret);
+	ubus_send_reply(ctx,req,b.head);
+	return 0;
 }
 
 static const struct ubus_method master_methods[] = {
@@ -352,6 +393,7 @@ static const struct ubus_method master_methods[] = {
 	UBUS_METHOD("tpub",tpub_handler,tpub_policy),
 	UBUS_METHOD("pubf",pubf_handler,pubf_policy),
 	UBUS_METHOD("tpubf",tpubf_handler,tpubf_policy),
+	UBUS_METHOD("check",check_handler,check_policy),
 };
 
 static struct ubus_object_type master_object_type = 
