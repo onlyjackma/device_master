@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>
-#include "config.h"
 #include <string.h>
+#include "config.h"
 
 #define MQTT_DEFAULT_PORT 1883
 
