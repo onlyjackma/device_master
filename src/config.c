@@ -23,6 +23,14 @@ static void option_error(char *key , const char *file){
 	free_config();
 }
 
+static int check_config(const char *file){
+	if(!conf->mqtt_server || !conf->mqtt_sub_topic || !conf->mqtt_pub_topic){
+		printf("config error ,Please check your config file %s!\n",file);
+		free_config();
+	}
+}
+
+
 int parse_config_file(const char *config_file)
 {
 	FILE *fd;
@@ -45,7 +53,7 @@ int parse_config_file(const char *config_file)
 			continue;
 		sscanf(buf,"%s = %s",key,value);
 
-		printf("key:%s, value :%s\n",key,value);
+		//printf("key:%s, value :%s\n",key,value);
 
 		if(strncmp(key,"ubus_sock_path",strlen(key))==0){
 			if(strlen(value) != 0)
@@ -91,17 +99,15 @@ int parse_config_file(const char *config_file)
 			}else{
 				option_error(key,config_file);
 			}
-
-		}else {
-			printf("No such options");
 		}
 
 		
 		bzero(key,1024);
 		bzero(value,1024);
 	}
-
+	
 	fclose(fd);
+	check_config(config_file);
 	return 0;
 }
 
@@ -138,6 +144,7 @@ int free_config()
 		free(conf->mqtt_pub_topic);
 	}
 	free(conf);
+	exit(1);
 }
 
 #if 0
@@ -146,6 +153,4 @@ int main(){
 	printf("%s ,%s, %d ,%d ,%s ,%s %s ,%s",conf->ubus_sock_path,conf->mqtt_server,conf->mqtt_port,conf->mqtt_keepalive,conf->mqtt_name,conf->mqtt_password,conf->mqtt_sub_topic,conf->mqtt_pub_topic);
 }
 #endif
-
-
 
